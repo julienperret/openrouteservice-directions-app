@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <title>Simple app to get routes between origin-destination addresses</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script src="https://unpkg.com/papaparse@latest/papaparse.min.js"></script>
+  <script type="module" src="js/ors-js-client.js"></script>
+</head>
+
+<body>
+  <div class="container-fluid p-5 text-center">
+    <h1>Simple app to get routes between origin-destination addresses</h1>
+    <form id="myForm" class="mb-3">
+      <div class="mb-3">
+        <label for="inputToken" class="form-label">Token</label>
+        <input type="password" class="form-control" id="inputToken">
+      </div>
+      <div class="mb-3 form-check">
+        <label for="csvFile" class="form-label">Choose a local CSV file</label>
+        <input class="form-control" type="file" id="csvFile">
+      </div>
+      <div class="mb-3 form-check">
+        <label class="form-label" for="maxLines">Max number of lines to process</label>
+        <input value="50" type="number" id="maxLines" class="form-control" />
+      </div>
+      <button type="submit" class="btn btn-primary">Submit</button>
+    </form>
+    <div class="progress mb-3">
+      <div id="progress" class="progress-bar" role="progressbar" aria-valuenow="0" aria-valuemin="0" aria-valuemax="100"></div>
+    </div>
+    <a class="btn btn-primary disabled" href="#" role="button" id="save">Save File</a>
+    <script>
+      const myForm = document.getElementById("myForm");
+      const myToken = document.getElementById("inputToken");
+      const csvFile = document.getElementById("csvFile");
+      const maxLines = document.getElementById("maxLines");
+      const progress = document.getElementById("progress");
+      const saveFileButton = document.getElementById("save");
+      var content = [];
+      // Function to count non-empty lines in a CSV file
+      function countNonEmptyLinesInCSV(file) {
+          return new Promise((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => {
+                  const lines = reader.result.split('\n').filter(line => line.trim() !== '');
+                  resolve(lines.length);
+              };
+              reader.onerror = reject;
+              reader.readAsText(file);
+          });
+      }
+      myForm.addEventListener("submit", async function (e) {
+        e.preventDefault();
+        const Geocode = new Openrouteservice.Geocode({ api_key: myToken.value });
+        async function geocode(inputText) {
+          try {
+            let response = await Geocode.geocode({
+              text: inputText,
+              boundary_country: ["FR"]
+            })
+            console.log("response: ", response)
+            return response['features'][0]['geometry']['coordinates']
+          } catch (err) {
+            console.log("An error occurred: " + err.status)
+            console.error(await err.response.json())
+            return null;
+          }
+        }
+        const input = csvFile.files[0];
+        const size = await countNonEmptyLinesInCSV(input);
+        console.log("size",size);
+        const maxValue = Math.min(size -1 , maxLines.value);
+        console.log("max", maxValue);
+        progress.setAttribute("aria-valuemax", maxValue);
+        async function stepFunction(results, parser) {
+          console.log("Row data:", results.data);
+          const origin = results.data["Origin"];
+          const destination = results.data["Destination"];
+          parser.pause();
+          const origin_geocoded = await geocode(origin);
+          console.log(origin_geocoded);
+          if (origin_geocoded) {
+            results.data["Origin_coordinates"] = origin_geocoded;
+          }
+          const destination_geocoded = await geocode(destination);
+          console.log(destination_geocoded);
+          if (destination_geocoded) {
+            results.data["Destination_geocoded"] = destination_geocoded;
+          }
+          if (origin_geocoded && destination_geocoded) {
+            const orsDirections = new Openrouteservice.Directions({ api_key: myToken.value });
+            await orsDirections.calculate({
+              coordinates: [origin_geocoded, destination_geocoded],
+              profile: "driving-car",
+              format: "json",
+              api_version: 'v2',
+            })
+              .then(function (json) {
+                const properties = json["routes"][0]["summary"];
+                results.data["Distance"] = properties["distance"];
+                results.data["Duration"] = properties["duration"];
+              })
+              .catch(function (err) {
+                let response = JSON.stringify(err, null, "\t")
+                console.error(response);
+              });
+          }
+          // console.log("Row errors:", results.errors);
+          content.push(results.data);
+          let currentValue = Number(progress.getAttribute("aria-valuenow"))
+          progress.setAttribute("aria-valuenow", currentValue+1);
+          progress.style.width=((currentValue+1)*100/maxValue)+'%';
+          parser.resume();
+        }
+        function completeFunction() {
+          console.log("complete!!!");
+          var csv_data = Papa.unparse(content);
+          var csvDataAsBlob = new Blob([csv_data], { type: 'text/csv;charset=utf-8;' });
+          console.log(csv_data);
+          saveFileButton.setAttribute("href", window.URL.createObjectURL(csvDataAsBlob));
+          saveFileButton.setAttribute("download", "result.csv");
+          saveFileButton.classList.remove("disabled");
+        }
+        Papa.parse(input, { step: stepFunction, skipEmptyLines: true, complete: completeFunction, header: true, preview: maxLines.value/*, worker: true*/ });
+      });
+    </script>
+</body>
+
+</html>
